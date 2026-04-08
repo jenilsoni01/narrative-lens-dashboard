@@ -7,6 +7,7 @@ on:
       - "backend/**"
       - "deploy/aws/**"
       - ".github/workflows/deploy-aws.yml"
+      - "README.md"
   workflow_dispatch:
     inputs:
       deploy_backend:
