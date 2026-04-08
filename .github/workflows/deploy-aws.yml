@@ -128,6 +128,10 @@ jobs:
             set -e
             sudo mkdir -p '$EC2_DATA_HOST_DIR' '$APP_DIR/backend'
             cd '$APP_DIR/backend'
+            df -h
+            rm -rf .venv
+            rm -rf ~/.cache/pip || true
+            sudo apt-get clean || true
             if ! python3 -m venv .venv; then
               sudo apt-get update
               PY_VER=\$(python3 -c \"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')\")
@@ -136,7 +140,7 @@ jobs:
             fi
             . .venv/bin/activate
             python -m pip install --upgrade pip
-            pip install -r requirements.txt
+            PIP_NO_CACHE_DIR=1 pip install --no-cache-dir -r requirements.txt
             sudo mv /tmp/$SYSTEMD_SERVICE_NAME.service /etc/systemd/system/$SYSTEMD_SERVICE_NAME.service
             sudo systemctl daemon-reload
             sudo systemctl enable $SYSTEMD_SERVICE_NAME
