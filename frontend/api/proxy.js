@@ -10,7 +10,7 @@ export default async function handler(req, res) {
 
     if (!/^https?:\/\//i.test(backendBase)) {
       return res.status(500).json({
-        error: "VITE_API_BASE must be an absolute backend URL (e.g. http://100.48.72.181)",
+        error: "VITE_API_BASE must be an absolute backend URL (e.g. http://100.48.72.181:5000)",
       });
     }
 
@@ -30,10 +30,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const pathSegments = Array.isArray(req.query.path) ? req.query.path : [];
-    const upstreamPath = pathSegments.join("/");
+    const upstreamPath = String(req.query.path || "").replace(/^\/+/, "");
     const query = new URLSearchParams();
-
     for (const [key, value] of Object.entries(req.query)) {
       if (key === "path") {
         continue;

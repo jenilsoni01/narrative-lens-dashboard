@@ -158,6 +158,13 @@ jobs:
             else
               echo "requirements unchanged, skipping pip install"
             fi
+
+            if [ ! -f "$EC2_DATA_HOST_DIR/social_media.duckdb" ]; then
+              echo "Expected DuckDB file not found at: $EC2_DATA_HOST_DIR/social_media.duckdb" >&2
+              echo "Set repo variable EC2_DATA_HOST_DIR to correct path, then redeploy." >&2
+              exit 1
+            fi
+
             sudo mv /tmp/$SYSTEMD_SERVICE_NAME.service /etc/systemd/system/$SYSTEMD_SERVICE_NAME.service
             sudo systemctl daemon-reload
             sudo systemctl enable $SYSTEMD_SERVICE_NAME
