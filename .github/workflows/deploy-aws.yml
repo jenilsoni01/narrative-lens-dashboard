@@ -6,15 +6,16 @@ on:
     branches: ["main"]
     paths:
       - "backend/**"
-      - "deploy/aws/**"
-      - ".github/workflows/deploy-aws.yml"
-      - "README.md"
   workflow_dispatch:
     inputs:
       deploy_backend:
         description: "Deploy backend (EC2 only)"
         type: boolean
         default: true
+
+concurrency:
+  group: deploy-aws-backend
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -23,6 +24,8 @@ env:
   EC2_HOST: ${{ vars.EC2_HOST }}
   EC2_USER: ${{ vars.EC2_USER }}
   EC2_PORT: ${{ vars.EC2_PORT }}
+  BACKEND_DOMAIN: ${{ vars.BACKEND_DOMAIN }}
+  LETSENCRYPT_EMAIL: ${{ vars.LETSENCRYPT_EMAIL }}
   EC2_DATA_HOST_DIR: ${{ vars.EC2_DATA_HOST_DIR }}
   APP_DIR: ${{ vars.EC2_APP_DIR }}
   SYSTEMD_SERVICE_NAME: ${{ vars.SYSTEMD_SERVICE_NAME }}
@@ -83,6 +86,11 @@ jobs:
             exit 1
           fi
 
+          ENABLE_SSL="0"
+          if [ -n "$BACKEND_DOMAIN" ] && [ -n "$LETSENCRYPT_EMAIL" ]; then
+            ENABLE_SSL="1"
+          fi
+
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
@@ -125,26 +133,86 @@ jobs:
 
           scp -i ~/.ssh/id_ed25519 -P "$EC2_PORT" /tmp/narrative-lens-backend.service "$EC2_USER@$EC2_HOST:/tmp/$SYSTEMD_SERVICE_NAME.service"
 
+            if [ "$ENABLE_SSL" = "1" ]; then
+              cat > /tmp/narrative-lens-nginx.conf <<EOF
+              server {
+                listen 80;
+                listen [::]:80;
+                server_name $BACKEND_DOMAIN;
+
+                location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+                }
+              }
+              EOF
+
+              scp -i ~/.ssh/id_ed25519 -P "$EC2_PORT" /tmp/narrative-lens-nginx.conf "$EC2_USER@$EC2_HOST:/tmp/narrative-lens-nginx.conf"
+            fi
+
           ssh -i ~/.ssh/id_ed25519 -p "$EC2_PORT" "$EC2_USER@$EC2_HOST" "
             set -e
             sudo mkdir -p '$EC2_DATA_HOST_DIR' '$APP_DIR/backend'
             cd '$APP_DIR/backend'
             df -h
-            rm -rf .venv
-            rm -rf ~/.cache/pip || true
-            sudo apt-get clean || true
-            if ! python3 -m venv .venv; then
-              sudo apt-get update
-              PY_VER=\$(python3 -c \"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')\")
-              sudo apt-get install -y python3-venv python\${PY_VER}-venv || sudo apt-get install -y python3-venv
-              python3 -m venv .venv
+            NEED_INSTALL=0
+            if [ ! -x .venv/bin/python ]; then
+              NEED_INSTALL=1
+              if ! python3 -m venv .venv; then
+                sudo apt-get update
+                PY_VER=\$(python3 -c \"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')\")
+                sudo apt-get install -y python3-venv python\${PY_VER}-venv || sudo apt-get install -y python3-venv
+                python3 -m venv .venv
+              fi
             fi
+            REQ_HASH=\$(sha256sum requirements.txt | awk '{print \$1}')
+            LAST_REQ_HASH=\$(cat .venv/.requirements.sha256 2>/dev/null || true)
+            if [ "\$REQ_HASH" != "\$LAST_REQ_HASH" ]; then
+              NEED_INSTALL=1
+            fi
+
             . .venv/bin/activate
-            python -m pip install --upgrade pip
-            PIP_NO_CACHE_DIR=1 pip install --no-cache-dir -r requirements.txt
+
+            if [ "\$NEED_INSTALL" -eq 1 ]; then
+              rm -rf ~/.cache/pip || true
+              sudo apt-get clean || true
+              python -m pip install --upgrade pip
+              PIP_NO_CACHE_DIR=1 pip install --no-cache-dir -r requirements.txt
+              echo "\$REQ_HASH" > .venv/.requirements.sha256
+            else
+              echo "requirements unchanged, skipping pip install"
+            fi
             sudo mv /tmp/$SYSTEMD_SERVICE_NAME.service /etc/systemd/system/$SYSTEMD_SERVICE_NAME.service
             sudo systemctl daemon-reload
             sudo systemctl enable $SYSTEMD_SERVICE_NAME
             sudo systemctl restart $SYSTEMD_SERVICE_NAME
             sudo systemctl is-active $SYSTEMD_SERVICE_NAME
+
+            if [ -n "$BACKEND_DOMAIN" ] && [ -n "$LETSENCRYPT_EMAIL" ]; then
+              sudo apt-get update
+              sudo apt-get install -y nginx certbot python3-certbot-nginx
+              sudo mv /tmp/narrative-lens-nginx.conf /etc/nginx/sites-available/narrative-lens-backend
+              sudo ln -sfn /etc/nginx/sites-available/narrative-lens-backend /etc/nginx/sites-enabled/narrative-lens-backend
+              if [ -L /etc/nginx/sites-enabled/default ]; then
+                sudo rm -f /etc/nginx/sites-enabled/default
+              fi
+              sudo nginx -t
+              sudo systemctl enable nginx
+              sudo systemctl restart nginx
+
+              if [ ! -f /etc/letsencrypt/live/$BACKEND_DOMAIN/fullchain.pem ]; then
+                sudo certbot --nginx -d $BACKEND_DOMAIN --non-interactive --agree-tos -m $LETSENCRYPT_EMAIL --redirect
+              else
+                sudo certbot renew --quiet
+                sudo certbot --nginx -d $BACKEND_DOMAIN --non-interactive --agree-tos -m $LETSENCRYPT_EMAIL --redirect
+              fi
+
+              sudo systemctl reload nginx
+            else
+              echo 'SSL skipped: BACKEND_DOMAIN/LETSENCRYPT_EMAIL not set. Backend continues on port 5000 (HTTP).'
+            fi
           "
