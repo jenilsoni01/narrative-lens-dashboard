@@ -1,0 +1,13 @@
+.env
+data
+__pycache__
+*.pyc
+.venv
+.DS_Store
+jenil-prompts.md
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+
+artifacts
+logs
