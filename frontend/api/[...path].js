@@ -14,6 +14,22 @@ export default async function handler(req, res) {
       });
     }
 
+    let parsedBase;
+    try {
+      parsedBase = new URL(backendBase);
+    } catch {
+      return res.status(500).json({
+        error: "VITE_API_BASE is not a valid URL",
+      });
+    }
+
+    const isIpv4Host = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parsedBase.hostname);
+    if (isIpv4Host && parsedBase.protocol === "http:" && !parsedBase.port) {
+      return res.status(500).json({
+        error: "VITE_API_BASE must include backend port for EC2 IP, e.g. http://100.48.72.181:5000",
+      });
+    }
+
     const pathSegments = Array.isArray(req.query.path) ? req.query.path : [];
     const upstreamPath = pathSegments.join("/");
     const query = new URLSearchParams();
