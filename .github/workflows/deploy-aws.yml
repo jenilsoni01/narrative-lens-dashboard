@@ -128,7 +128,12 @@ jobs:
             set -e
             sudo mkdir -p '$EC2_DATA_HOST_DIR' '$APP_DIR/backend'
             cd '$APP_DIR/backend'
-            python3 -m venv .venv
+            if ! python3 -m venv .venv; then
+              sudo apt-get update
+              PY_VER=\$(python3 -c \"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')\")
+              sudo apt-get install -y python3-venv python\${PY_VER}-venv || sudo apt-get install -y python3-venv
+              python3 -m venv .venv
+            fi
             . .venv/bin/activate
             python -m pip install --upgrade pip
             pip install -r requirements.txt
