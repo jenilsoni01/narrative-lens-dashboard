@@ -1,0 +1,139 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "backend/**"
+      - "deploy/aws/**"
+      - ".github/workflows/deploy-aws.yml"
+  workflow_dispatch:
+    inputs:
+      deploy_backend:
+        description: "Deploy backend (EC2 only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  EC2_HOST: ${{ vars.EC2_HOST }}
+  EC2_USER: ${{ vars.EC2_USER }}
+  EC2_PORT: ${{ vars.EC2_PORT }}
+  EC2_DATA_HOST_DIR: ${{ vars.EC2_DATA_HOST_DIR }}
+  APP_DIR: ${{ vars.EC2_APP_DIR }}
+  SYSTEMD_SERVICE_NAME: ${{ vars.SYSTEMD_SERVICE_NAME }}
+  CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+  GROQ_API: ${{ secrets.GROQ_API }}
+  SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+jobs:
+  backend:
+    name: Deploy Backend to EC2 (No IAM/SSM)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || inputs.deploy_backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy on EC2 via SSH
+        run: |
+          if [ -z "$EC2_HOST" ]; then
+            echo "EC2_HOST is required in repository variables." >&2
+            exit 1
+          fi
+
+          if [ -z "$EC2_USER" ]; then
+            echo "EC2_USER is required in repository variables." >&2
+            exit 1
+          fi
+
+          if [ -z "$GROQ_API" ]; then
+            echo "GROQ_API is required as a GitHub secret." >&2
+            exit 1
+          fi
+
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "EC2_SSH_PRIVATE_KEY is required as a GitHub secret." >&2
+            exit 1
+          fi
+
+          if [ -z "$EC2_PORT" ]; then
+            EC2_PORT="22"
+          fi
+
+          if [ -z "$EC2_DATA_HOST_DIR" ]; then
+            EC2_DATA_HOST_DIR="/opt/narrative-lens/data/processed"
+          fi
+
+          if [ -z "$APP_DIR" ]; then
+            APP_DIR="/opt/narrative-lens/app"
+          fi
+
+          if [ -z "$SYSTEMD_SERVICE_NAME" ]; then
+            SYSTEMD_SERVICE_NAME="narrative-lens-backend"
+          fi
+
+          if [ -z "$CORS_ORIGINS" ]; then
+            echo "CORS_ORIGINS is required in repository variables." >&2
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$EC2_PORT" -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/id_ed25519 -p "$EC2_PORT" "$EC2_USER@$EC2_HOST" "sudo mkdir -p '$EC2_DATA_HOST_DIR' '$APP_DIR/backend'"
+
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_ed25519 -p $EC2_PORT" \
+            --exclude '.venv/' \
+            --exclude '__pycache__/' \
+            --exclude '.env' \
+            --exclude '.git/' \
+            backend/ "$EC2_USER@$EC2_HOST:$APP_DIR/backend/"
+
+          cat > /tmp/narrative-lens.env <<EOF
+          GROQ_API=$GROQ_API
+          CORS_ORIGINS=$CORS_ORIGINS
+          DATA_PROCESSED_DIR=$EC2_DATA_HOST_DIR
+          EOF
+
+          scp -i ~/.ssh/id_ed25519 -P "$EC2_PORT" /tmp/narrative-lens.env "$EC2_USER@$EC2_HOST:$APP_DIR/.env"
+
+          cat > /tmp/narrative-lens-backend.service <<EOF
+          [Unit]
+          Description=Narrative Lens Backend
+          After=network.target
+
+          [Service]
+          User=$EC2_USER
+          WorkingDirectory=$APP_DIR/backend
+          EnvironmentFile=$APP_DIR/.env
+          ExecStart=$APP_DIR/backend/.venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 2 wsgi:app
+          Restart=always
+          RestartSec=3
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          scp -i ~/.ssh/id_ed25519 -P "$EC2_PORT" /tmp/narrative-lens-backend.service "$EC2_USER@$EC2_HOST:/tmp/$SYSTEMD_SERVICE_NAME.service"
+
+          ssh -i ~/.ssh/id_ed25519 -p "$EC2_PORT" "$EC2_USER@$EC2_HOST" "
+            set -e
+            sudo mkdir -p '$EC2_DATA_HOST_DIR' '$APP_DIR/backend'
+            cd '$APP_DIR/backend'
+            python3 -m venv .venv
+            . .venv/bin/activate
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            sudo mv /tmp/$SYSTEMD_SERVICE_NAME.service /etc/systemd/system/$SYSTEMD_SERVICE_NAME.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable $SYSTEMD_SERVICE_NAME
+            sudo systemctl restart $SYSTEMD_SERVICE_NAME
+            sudo systemctl is-active $SYSTEMD_SERVICE_NAME
+          "
